@@ -242,7 +242,7 @@ def _sample_risk_factor_relative_risks(risk_defs: Dict[str, dict],
 
 
 general_config = {
-    'number_of_timesteps': 18,
+    'number_of_timesteps': 17,
     'population': 33167098,
          
     'time_step_years': 1,
