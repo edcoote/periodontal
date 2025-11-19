@@ -848,6 +848,7 @@ RISK_FACTOR_HR_INTERVALS: Dict[str, Dict[str, Dict[str, Tuple[float, float, floa
 # Constants & seed
 
 DEMENTIA_STAGES = ['cognitively_normal', 'mild', 'moderate', 'severe', 'death']
+DEMENTIA_DISEASE_STAGES = ('mild', 'moderate', 'severe')  # Active disease stages (excludes normal and death)
 LIVING_SETTINGS = ['home', 'institution']
 random.seed(42)  # reproducibility
 
@@ -1023,6 +1024,38 @@ def _canonical_sex_label(sex: Optional[str]) -> str:
         return 'all'
     return label
 
+
+def _resolve_by_sex(mapping: dict, sex: Optional[str], fallbacks: tuple = ('all', 'any', 'either', 'both', 'default')) -> Any:
+    """
+    Resolve a value from a sex-keyed dictionary with standardized fallback logic.
+
+    Args:
+        mapping: Dictionary potentially keyed by sex labels
+        sex: The sex to look up
+        fallbacks: Tuple of fallback keys to try if exact match fails
+
+    Returns:
+        The resolved value, or None if no match found
+    """
+    if not mapping or not isinstance(mapping, dict):
+        return None
+
+    # Try exact sex match
+    if sex is not None:
+        target = _canonical_sex_label(sex)
+        for key, value in mapping.items():
+            if _canonical_sex_label(key) == target:
+                return value
+
+    # Try fallback keys
+    for fallback in fallbacks:
+        for key, value in mapping.items():
+            if _canonical_sex_label(key) == fallback or key == fallback:
+                return value
+
+    # Return first value as last resort (maintains backward compatibility)
+    return None
+
 def sample_sex(sex_distribution: Dict[str, float]) -> str:
     """Sample sex from a weight dictionary; defaults to 'unspecified' if absent."""
     if not sex_distribution:
@@ -1105,7 +1138,7 @@ def get_dementia_stage_weights_for_sex(stage_mix_config: Optional[dict],
         return None
     dementia_weights = {
         stage: weight for stage, weight in mix.items()
-        if stage in {'mild', 'moderate', 'severe'}
+        if stage in DEMENTIA_DISEASE_STAGES
     }
     if not dementia_weights:
         return None
@@ -1547,9 +1580,6 @@ def get_stage_age_qaly(subject: str,
         return None
     return get_age_specific_utility(age, age_map)
 
-def _normalise_sex(sex: Optional[str]) -> str:
-    return str(sex or '').strip().lower()
-
 def get_qaly_by_age_and_sex(age: float,
                             sex: Optional[str],
                             config: dict) -> float:
@@ -1579,7 +1609,7 @@ def get_dementia_stage_qaly(stage: str,
         except (TypeError, ValueError):
             return None
 
-    sex_key = _normalise_sex(sex)
+    sex_key = _canonical_sex_label(sex)
     if stage in stage_map and isinstance(stage_map[stage], dict):
         entry = stage_map[stage]
         if sex_key and sex_key in entry:
@@ -1634,7 +1664,7 @@ def get_caregiver_qaly(age: float,
                        sex: Optional[str],
                        config: dict) -> Optional[float]:
     """Return caregiver QALY weight if caregiver tables are provided."""
-    sex_key = _normalise_sex(sex)
+    sex_key = _canonical_sex_label(sex)
     tables_by_sex = config.get('caregiver_qalys_by_age_and_sex')
     if isinstance(tables_by_sex, dict) and tables_by_sex:
         sex_table = tables_by_sex.get(sex_key) or tables_by_sex.get('all')
@@ -1832,8 +1862,8 @@ def initialize_population(population: int,
             'entry_age': age,
             'entry_time_step': 0,
             'time_since_entry': 0.0,
-            'ever_dementia': stage0 in ('mild', 'moderate', 'severe'),
-            'age_at_onset': age if stage0 in ('mild', 'moderate', 'severe') else None,
+            'ever_dementia': stage0 in DEMENTIA_DISEASE_STAGES,
+            'age_at_onset': age if stage0 in DEMENTIA_DISEASE_STAGES else None,
         }
         age_counter[age] += 1
 
@@ -2094,7 +2124,7 @@ def update_living_setting(individual_data: dict, config: dict) -> None:
     if not individual_data['alive']:
         return
     stage = individual_data['dementia_stage']
-    if stage in ['mild', 'moderate', 'severe']:
+    if stage in DEMENTIA_DISEASE_STAGES:
         probs = _select_living_setting_transition(config, stage, float(individual_data.get('age', 0.0)))
         current = individual_data['living_setting']
         if current == 'home' and random.random() < probs.get('to_institution', 0.0):
@@ -2149,7 +2179,7 @@ def summarize_population_state(population_state: Dict[int, dict],
             alive_count += 1
             age_alive_sum += person['age']
             living_counter[person.get('living_setting', 'unknown')] += 1
-            if stage in ('mild', 'moderate', 'severe'):
+            if stage in DEMENTIA_DISEASE_STAGES:
                 dementia_age_sum += person['age']
                 dementia_count += 1
                 band = assign_age_to_reporting_band(person['age'])
@@ -2251,7 +2281,7 @@ def compute_lifetime_risk_by_entry_age(population_state: Dict[int, dict],
         total_by_age[entry_age_int] += 1
 
         ever_dementia = bool(person.get('ever_dementia', False))
-        if baseline_stage in ('mild', 'moderate', 'severe'):
+        if baseline_stage in DEMENTIA_DISEASE_STAGES:
             ever_dementia = True
         if ever_dementia:
             dementia_by_age[entry_age_int] += 1
@@ -2300,6 +2330,18 @@ def run_model(config: dict, seed: Optional[int] = None) -> dict:
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
+
+    # Validate required configuration parameters
+    required_keys = ['number_of_timesteps', 'population', 'time_step_years', 'stage_transition_durations']
+    missing_keys = [key for key in required_keys if key not in config]
+    if missing_keys:
+        raise ValueError(f"Missing required config keys: {missing_keys}")
+
+    if config['number_of_timesteps'] <= 0:
+        raise ValueError(f"number_of_timesteps must be positive, got {config['number_of_timesteps']}")
+    if config['population'] <= 0:
+        raise ValueError(f"population must be positive, got {config['population']}")
+
     number_of_timesteps = config['number_of_timesteps'] + 1
     population = config['population']
     base_year = int(config.get('base_year', 2023))
@@ -2370,7 +2412,7 @@ def run_model(config: dict, seed: Optional[int] = None) -> dict:
             sex_key = person.get('sex', 'unspecified')
             alive_bucket = alive_counts_by_sex_band.setdefault(sex_key, {})
             alive_bucket[band] = alive_bucket.get(band, 0) + 1
-            if person.get('dementia_stage') in ('mild', 'moderate', 'severe'):
+            if person.get('dementia_stage') in DEMENTIA_DISEASE_STAGES:
                 prevalent_bucket = prevalent_counts_by_sex_band.setdefault(sex_key, {})
                 prevalent_bucket[band] = prevalent_bucket.get(band, 0) + 1
 
@@ -2470,7 +2512,7 @@ def run_model(config: dict, seed: Optional[int] = None) -> dict:
         if band is None:
             continue
         age_band_alive_counts[band] += 1
-        if person.get('dementia_stage') in ('mild', 'moderate', 'severe'):
+        if person.get('dementia_stage') in DEMENTIA_DISEASE_STAGES:
             age_band_dementia_counts[band] += 1
 
     incidence_age_records: List[dict] = []
@@ -2735,7 +2777,7 @@ def extract_psa_metrics(model_results: dict) -> dict:
     metrics['total_costs_all'] = metrics['total_costs_nhs'] + metrics['total_costs_informal']
     metrics['total_qalys_combined'] = metrics['total_qalys_patient'] + metrics['total_qalys_caregiver']
 
-    for stage in ('mild', 'moderate', 'severe'):
+    for stage in DEMENTIA_DISEASE_STAGES:
         key = f'stage_{stage}'
         metrics[key] = float(final_summary.get(key, 0) or 0)
 
@@ -2824,7 +2866,7 @@ def plot_ad_prevalence(model_results, save_path="plots/ad_prevalence.png", show=
         print("No summary data available; skipping prevalence plot.")
         return
 
-    ad_cols = [f'stage_{stage}' for stage in ('mild', 'moderate', 'severe')]
+    ad_cols = [f'stage_{stage}' for stage in DEMENTIA_DISEASE_STAGES]
     for col in ad_cols:
         if col not in df.columns:
             df[col] = 0
@@ -2977,7 +3019,7 @@ def plot_dementia_prevalence_by_stage(model_results,
         print("No summary data available; skipping stage-specific prevalence plot.")
         return
 
-    tracked_stages = stages if stages is not None else ['mild', 'moderate', 'severe']
+    tracked_stages = stages if stages is not None else list(DEMENTIA_DISEASE_STAGES)
     if not tracked_stages:
         print("No stages provided for prevalence plotting; skipping stage-specific prevalence plot.")
         return
@@ -3830,11 +3872,6 @@ if __name__ == "__main__":
     plot_onset_probability_vs_age_from_base_prob(general_config, show=True)
     export_results_to_excel(model_results)
 
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
 # -------- 1. Data (paste directly) --------
 data = [
     [35, 49, "F", 0.0001, 0.000776677],
@@ -3853,8 +3890,9 @@ df["age_band"] = df.apply(
 )
 
 # -------- 2. Output folder --------
-save_dir = r"C:\Users\EdwardCoote\OneDrive\DementiaModel\plots"
-os.makedirs(save_dir, exist_ok=True)
+# Use a relative path in the current working directory for portability
+save_dir = Path("plots")
+save_dir.mkdir(parents=True, exist_ok=True)
 
 # -------- 3. Simple OLS regression (no statsmodels) --------
 def ols_fit(x, y):
