@@ -1217,57 +1217,69 @@ def sample_stage_from_mix(stage_mix: Optional[Dict[str, float]],
     probs = list(weights.values())
     return random.choices(population=stages, weights=probs, k=1)[0]
 
+def _resolve_by_age_band(band_items: List[Tuple[Tuple[int, int], Any]], age: Optional[int]) -> Any:
+    """Resolve value from age band tuples like (65, 79)."""
+    if not band_items:
+        return None
+    if age is not None:
+        # Try exact band match
+        for (lo, hi), nested in band_items:
+            if lo <= age <= hi:
+                return nested
+        # Fallback: closest band by midpoint
+        return min(band_items, key=lambda item: abs((item[0][0] + item[0][1]) / 2.0 - age))[1]
+    return band_items[0][1]
+
+
+def _resolve_by_numeric_threshold(numeric_items: List[Tuple[Union[int, float], Any]], age: Optional[int]) -> Any:
+    """Resolve value from numeric threshold keys like 65, 70, 75."""
+    if not numeric_items:
+        return None
+    numeric_items = sorted(numeric_items, key=lambda item: item[0])
+    if age is not None:
+        chosen = numeric_items[0][1]
+        for threshold, nested in numeric_items:
+            if age >= threshold:
+                chosen = nested
+            else:
+                break
+        return chosen
+    return numeric_items[0][1]
+
+
 def resolve_risk_value(value: Any,
                        age: Optional[int],
                        sex: Optional[str]) -> Any:
     """Recursively resolve nested risk metadata keyed by sex and/or age (scalars allowed)."""
-    if isinstance(value, dict):
-        sex_keys = [k for k in value.keys() if isinstance(k, str)]
-        if sex_keys:
-            if sex is not None:
-                target = _canonical_sex_label(sex)
-                for key in sex_keys:
-                    if _canonical_sex_label(key) == target:
-                        return resolve_risk_value(value[key], age, None)
-            for fallback in ('all', 'any', 'either', 'both', 'default'):
-                for key in sex_keys:
-                    if _canonical_sex_label(key) == fallback or key == fallback:
-                        return resolve_risk_value(value[key], age, None)
+    if not isinstance(value, dict):
+        return value
 
-        band_items = [(key, nested) for key, nested in value.items()
-                      if isinstance(key, tuple) and len(key) == 2]
-        if band_items:
-            if age is not None:
-                for band, nested in band_items:
-                    lo, hi = band
-                    if lo <= age <= hi:
-                        return resolve_risk_value(nested, age, None)
-                # fallback: choose band with midpoint closest to age
-                closest_nested = min(
-                    band_items,
-                    key=lambda item: abs((item[0][0] + item[0][1]) / 2.0 - age)
-                )[1]
-                return resolve_risk_value(closest_nested, age, None)
-            return resolve_risk_value(band_items[0][1], age, None)
+    # Strategy 1: Sex-keyed resolution
+    sex_keys = {k: v for k, v in value.items() if isinstance(k, str)}
+    if sex_keys:
+        resolved = _resolve_by_sex(sex_keys, sex)
+        if resolved is not None:
+            return resolve_risk_value(resolved, age, None)
 
-        numeric_items = [(key, nested) for key, nested in value.items()
-                         if isinstance(key, (int, float))]
-        if numeric_items:
-            numeric_items.sort(key=lambda item: item[0])
-            if age is not None:
-                chosen = numeric_items[0][1]
-                for threshold, nested in numeric_items:
-                    if age >= threshold:
-                        chosen = nested
-                    else:
-                        break
-                return resolve_risk_value(chosen, age, None)
-            return resolve_risk_value(numeric_items[0][1], age, None)
+    # Strategy 2: Age band resolution (tuple keys)
+    band_items = [(k, v) for k, v in value.items() if isinstance(k, tuple) and len(k) == 2]
+    if band_items:
+        resolved = _resolve_by_age_band(band_items, age)
+        if resolved is not None:
+            return resolve_risk_value(resolved, age, None)
 
-        if 'default' in value:
-            return resolve_risk_value(value['default'], age, None)
-        if 'all' in value:
-            return resolve_risk_value(value['all'], age, None)
+    # Strategy 3: Numeric threshold resolution
+    numeric_items = [(k, v) for k, v in value.items() if isinstance(k, (int, float))]
+    if numeric_items:
+        resolved = _resolve_by_numeric_threshold(numeric_items, age)
+        if resolved is not None:
+            return resolve_risk_value(resolved, age, None)
+
+    # Strategy 4: Default fallbacks
+    for fallback_key in ('default', 'all'):
+        if fallback_key in value:
+            return resolve_risk_value(value[fallback_key], age, None)
+
     return value
 
 def get_prevalence_for_person(risk_meta: dict, age: int, sex: str) -> float:
