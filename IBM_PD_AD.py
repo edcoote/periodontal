@@ -313,6 +313,7 @@ general_config = {
     'store_individual_survival': False,    # disable huge per-person survival records by default
     'report_paf_to_terminal': False,      # suppress console logging of PAF summary
     'compute_paf_in_main': False,         # skip running the heavy PAF counterfactual unless needed
+    'enable_constant_hazard_checks': False,  # disable relative-deviation diagnostics by default
 
     # Probabilistic sensitivity analysis configuration (sampling specs defined below)
     'psa': {
@@ -3602,6 +3603,8 @@ def run_constant_hazard_diagnostics(model_results: dict,
                                     *,
                                     tolerance: float = 0.05,
                                     show_plots: bool = False) -> None:
+    if not config.get('enable_constant_hazard_checks', False):
+        return
     """
     Runs:
       (1) Whole-cohort survival constant-hazard check (your existing helper)
@@ -3895,17 +3898,18 @@ if __name__ == "__main__":
     run_seed = 42
     model_results = run_model(general_config, seed=run_seed)
 
-    try:
-        baseline_check = check_constant_hazard_from_model(model_results, tolerance=0.05, cohort='baseline')
-        mean_hazard = baseline_check['mean_hazard']
-        max_dev = baseline_check['max_relative_deviation']
-        within = baseline_check['within_tolerance']
-        print("\nBaseline cohort constant-hazard check:")
-        print(f"  Mean hazard: {mean_hazard:.6f} per year")
-        print(f"  Max relative deviation: {max_dev:.2%}")
-        print(f"  Within tolerance (+/- 5%): {within}")
-    except ValueError as exc:
-        print(f"\nBaseline cohort constant-hazard check unavailable: {exc}")
+    if general_config.get('enable_constant_hazard_checks', False):
+        try:
+            baseline_check = check_constant_hazard_from_model(model_results, tolerance=0.05, cohort='baseline')
+            mean_hazard = baseline_check['mean_hazard']
+            max_dev = baseline_check['max_relative_deviation']
+            within = baseline_check['within_tolerance']
+            print("\nBaseline cohort constant-hazard check:")
+            print(f"  Mean hazard: {mean_hazard:.6f} per year")
+            print(f"  Max relative deviation: {max_dev:.2%}")
+            print(f"  Within tolerance (+/- 5%): {within}")
+        except ValueError as exc:
+            print(f"\nBaseline cohort constant-hazard check unavailable: {exc}")
 
     if general_config.get('compute_paf_in_main', False):
         paf_summary = compute_population_attributable_fraction(
@@ -3961,12 +3965,13 @@ if __name__ == "__main__":
     # After: model_results = run_model(general_config, seed=run_seed)
 
     # Run both diagnostics (set show_plots=True if you want them onscreen as well as saved)
-    run_constant_hazard_diagnostics(
-    model_results,
-    general_config,
-    tolerance=0.05,     # tighten/loosen as you like
-    show_plots=False
-)
+    if general_config.get('enable_constant_hazard_checks', False):
+        run_constant_hazard_diagnostics(
+            model_results,
+            general_config,
+            tolerance=0.05,     # tighten/loosen as you like
+            show_plots=False
+        )
 
     plot_ad_prevalence(model_results, show=True)
     plot_ad_incidence(model_results, show=True)
